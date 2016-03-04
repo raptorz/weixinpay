@@ -36,17 +36,48 @@ Created on 2014-11-24
 import json
 import time
 import random
-import urllib2
+try:
+    import urllib2
+except ImportError:
+    pass
+try:
+    from urllib import quote
+except ImportError:
+    from urllib.parse import quote
 import hashlib
 import threading
-from urllib import quote
 import xml.etree.ElementTree as ET
 
 try:
     import pycurl
-    from cStringIO import StringIO
+    try:
+        from cStringIO import StringIO
+    except ImportError:
+        from io import BytesIO as StringIO
 except ImportError:
     pycurl = None
+
+import sys
+if sys.version < "3":
+    reload(sys)
+    sys.setdefaultencoding('utf-8')
+    PY3 = False
+
+    def str2bytes(s):
+        return s
+
+    def bytes2str(s):
+        return s
+else:
+    def str2bytes(s):
+        return s.encode("utf-8") if isinstance(s, str) else s
+
+    def bytes2str(s):
+        return s.decode("utf-8") if not isinstance(s, str) else s
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class WxPayConf_pub(object):
@@ -148,12 +179,12 @@ class CurlClient(object):
         #post提交方式
         if post:
             self.curl.setopt(pycurl.POST, True)
-            self.curl.setopt(pycurl.POSTFIELDS, xml)
+            self.curl.setopt(pycurl.POSTFIELDS, str2bytes(xml))
         buff = StringIO()
         self.curl.setopt(pycurl.WRITEFUNCTION, buff.write)
 
         self.curl.perform()
-        return buff.getvalue()
+        return bytes2str(buff.getvalue())
 
 
 class HttpClient(Singleton):
@@ -198,7 +229,7 @@ class Common_util_pub(object):
         #签名步骤二：在string后加入KEY
         String = "{0}&key={1}".format(String,WxPayConf_pub.KEY)
         #签名步骤三：MD5加密
-        String = hashlib.md5(String).hexdigest()
+        String = hashlib.md5(str2bytes(String)).hexdigest()
         #签名步骤四：所有字符转为大写
         result_ = String.upper()
         return result_
@@ -206,7 +237,7 @@ class Common_util_pub(object):
     def arrayToXml(self, arr):
         """array转xml"""
         xml = ["<xml>"]
-        for k, v in arr.iteritems():
+        for k, v in arr.items():
             if v.isdigit():
                 xml.append("<{0}>{1}</{0}>".format(k, v))
             else:
