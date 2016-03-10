@@ -398,6 +398,9 @@ class UnifiedOrder_pub(Wxpay_client_pub):
         """获取prepay_id"""
         self.postXml()
         self.result = self.xmlToArray(self.response)
+        code = self.result.get("return_code", None)
+        if code:
+            raise ValueError(self.result.get("return_msg", "Weixin error!"))
         prepay_id = self.result["prepay_id"]
         return prepay_id
 
