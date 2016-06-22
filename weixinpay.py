@@ -48,6 +48,11 @@ import hashlib
 import threading
 import xml.etree.ElementTree as ET
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 try:
     import pycurl
     try:
@@ -55,6 +60,7 @@ try:
     except ImportError:
         from io import BytesIO as StringIO
 except ImportError:
+    logger.error("pycurl is needed")
     pycurl = None
 
 import sys
@@ -75,28 +81,30 @@ else:
     def bytes2str(s):
         return s.decode("utf-8") if not isinstance(s, str) else s
 
-import logging
-
-logger = logging.getLogger(__name__)
-
-
 class WxPayConf_pub(object):
     """配置账号信息"""
 
     #=======【基本信息设置】=====================================
     #微信公众号身份的唯一标识。审核通过后，在微信发送的邮件中查看
-    APPID = "wx8888888888888888"
+    APPID = ""
     #JSAPI接口中获取openid，审核后在公众平台开启开发模式后可查看
-    APPSECRET = "48888888888888888888888888888887"
+    APPSECRET = ""
     #受理商ID，身份标识
-    MCHID = "18888887"
+    MCHID = ""
     #商户支付密钥Key。审核通过后，在微信发送的邮件中查看
-    KEY = "48888888888888888888888888888886"
-   
+    # KEY = "48888888888888888888888888888886"
+    KEY = ""
+
+    # 微信app支付的基本信息
+    APP_APPID = ""
+    APP_MCH_ID = ""
+    APP_KEY = ""
+
 
     #=======【异步通知url设置】===================================
     #异步通知url，商户根据实际开发过程设定
-    NOTIFY_URL = "http://******.com/payback"
+    NOTIFY_URL = ""
+    APP_NOTIFY_URL = ""
 
     #=======【JSAPI路径设置】===================================
     #获取access_token过程中的跳转uri，通过跳转将code传入jsapi支付页面
@@ -104,8 +112,10 @@ class WxPayConf_pub(object):
 
     #=======【证书路径设置】=====================================
     #证书路径,注意应该填写绝对路径
-    SSLCERT_PATH = "/******/cacert/apiclient_cert.pem"
-    SSLKEY_PATH = "/******/cacert/apiclient_key.pem"
+    SSLCERT_PATH = ""
+    SSLCERT_PWD = ""
+    SSLKEY_PATH = ""
+    SSLKEY_PWD = ""
 
     #=======【curl超时设置】===================================
     CURL_TIMEOUT = 30
@@ -174,8 +184,12 @@ class CurlClient(object):
         if cert:
             self.curl.setopt(pycurl.SSLKEYTYPE, "PEM")
             self.curl.setopt(pycurl.SSLKEY, WxPayConf_pub.SSLKEY_PATH)
+            if WxPayConf_pub.SSLKEY_PWD:
+                self.curl.setopt(pycurl.SSLKEYPASSWD, WxPayConf_pub.SSLKEY_PWD)
             self.curl.setopt(pycurl.SSLCERTTYPE, "PEM")
             self.curl.setopt(pycurl.SSLCERT, WxPayConf_pub.SSLCERT_PATH)
+            if WxPayConf_pub.SSLCERT_PWD:
+                self.curl.setopt(pycurl.SSLCERTPASSWD, WxPayConf_pub.SSLCERT_PWD)
         #post提交方式
         if post:
             self.curl.setopt(pycurl.POST, True)
@@ -193,6 +207,7 @@ class HttpClient(Singleton):
         if pycurl is not None and WxPayConf_pub.HTTP_CLIENT != "URLLIB":
             return CurlClient
         else:
+            logger.debug("urllib not supported.")
             return UrllibClient
             
 
@@ -227,17 +242,20 @@ class Common_util_pub(object):
         #签名步骤一：按字典序排序参数,formatBizQueryParaMap已做
         String = self.formatBizQueryParaMap(obj, False)
         #签名步骤二：在string后加入KEY
-        String = "{0}&key={1}".format(String,WxPayConf_pub.KEY)
+        String = "{0}&key={1}".format(String, WxPayConf_pub.KEY)
+        logging.warning('wx回调验证签名key: %s ' % String)
         #签名步骤三：MD5加密
         String = hashlib.md5(str2bytes(String)).hexdigest()
         #签名步骤四：所有字符转为大写
         result_ = String.upper()
+        logging.warning('wx回调 签名: %s ' % result_)
         return result_
 
     def arrayToXml(self, arr):
         """array转xml"""
         xml = ["<xml>"]
         for k, v in arr.items():
+            # xml.append("<{0}>{1}</{0}>".format(k, v))
             if v.isdigit():
                 xml.append("<{0}>{1}</{0}>".format(k, v))
             else:
@@ -392,17 +410,83 @@ class UnifiedOrder_pub(Wxpay_client_pub):
         self.parameters["spbill_create_ip"] = "127.0.0.1"  #终端ip      
         self.parameters["nonce_str"] = self.createNoncestr()  #随机字符串
         self.parameters["sign"] = self.getSign(self.parameters)  #签名
-        return  self.arrayToXml(self.parameters)
+        return self.arrayToXml(self.parameters)
 
     def getPrepayId(self):
         """获取prepay_id"""
         self.postXml()
         self.result = self.xmlToArray(self.response)
-        code = self.result.get("return_code", None)
-        if code:
+        code = self.result.get("return_code", "FAIL")
+        if code != "SUCCESS":
             raise ValueError(self.result.get("return_msg", "Weixin error!"))
-        prepay_id = self.result["prepay_id"]
-        return prepay_id
+        code = self.result.get("result_code", "FAIL")
+        if code != "SUCCESS":
+            raise ValueError("%s: %s" % (self.result.get("err_code", -1), self.result.get("err_code_des", "Unknown error!")))
+        return self.result["prepay_id"]
+
+
+class WX_App(UnifiedOrder_pub):
+    """WXAPI支付——app端调起支付接口"""
+    parameters = None  #jsapi参数，格式为json
+    curl_timeout = None #curl超时时间
+
+    prepayid = None #使用统一支付接口得到的预支付id
+    partnerid = None  # 微信支付分配的商户号
+    package = 'Sign=WXPay'
+    noncestr = None
+    timestamp = None
+    sign = None
+    appid = None
+    key = None
+
+    def __init__(self, timeout=WxPayConf_pub.CURL_TIMEOUT):
+        self.curl_timeout = timeout
+        super(WX_App, self).__init__()
+
+    def setPrepayId(self, prepayId):
+        """设置prepay_id"""
+        self.prepayid = prepayId
+
+    def  getParameters(self):
+        """设置jsapi的参数"""
+        wxAppObj = {}
+        wxAppObj["appid"] = self.appid
+        wxAppObj["partnerid"] = self.partnerid
+        timestamp = int(time.time())
+        wxAppObj["timestamp"] = "{0}".format(timestamp)
+        wxAppObj["noncestr"] = self.createNoncestr()
+        wxAppObj["package"] = self.package
+        wxAppObj["prepayid"] = self.prepayid
+        wxAppObj["sign"] = self.getSign(wxAppObj)
+        # self.parameters = wxAppObj  # json.dumps(wxAppObj)
+
+        return wxAppObj
+
+    def getSign(self, obj):
+        """生成签名"""
+        #签名步骤一：按字典序排序参数,formatBizQueryParaMap已做
+        String = self.formatBizQueryParaMap(obj, False)
+        #签名步骤二：在string后加入KEY
+        String = "{0}&key={1}".format(String, self.key)
+        #签名步骤三：MD5加密
+        String = hashlib.md5(str2bytes(String)).hexdigest()
+        #签名步骤四：所有字符转为大写
+        result_ = String.upper()
+        return result_
+
+    def createXml(self):
+        """生成接口参数xml"""
+        #检测必填参数
+        if any(self.parameters[key] is None for key in ("out_trade_no", "body", "total_fee", "notify_url", "trade_type")):
+            raise ValueError("missing parameter")
+
+        # self.parameters["appid"] = WxPayConf_pub.APPID  #公众账号ID
+        # self.parameters["mch_id"] = WxPayConf_pub.MCHID  #商户号
+        self.parameters["spbill_create_ip"] = "127.0.0.1"  #终端ip
+        self.parameters["nonce_str"] = self.createNoncestr()  #随机字符串
+        self.parameters["sign"] = self.getSign(self.parameters)  #签名
+        return self.arrayToXml(self.parameters)
+
 
 
 class OrderQuery_pub(Wxpay_client_pub):
@@ -439,13 +523,27 @@ class Refund_pub(Wxpay_client_pub):
         self.curl_timeout = timeout
         super(Refund_pub, self).__init__()
 
+    def getSign(self, obj):
+        """生成签名"""
+        #签名步骤一：按字典序排序参数,formatBizQueryParaMap已做
+        String = self.formatBizQueryParaMap(obj, False)
+        #签名步骤二：在string后加入KEY
+        String = "{0}&key={1}".format(String, self.key)
+        logging.warning('wx回调验证签名key: %s ' % String)
+        #签名步骤三：MD5加密
+        String = hashlib.md5(str2bytes(String)).hexdigest()
+        #签名步骤四：所有字符转为大写
+        result_ = String.upper()
+        logging.warning('wx回调 签名: %s ' % result_)
+        return result_
+
     def createXml(self):
         """生成接口参数xml"""
         if any(self.parameters[key] is None for key in ("out_trade_no", "out_refund_no", "total_fee", "refund_fee", "op_user_id")):
             raise ValueError("missing parameter")
 
-        self.parameters["appid"] = WxPayConf_pub.APPID  #公众账号ID
-        self.parameters["mch_id"] = WxPayConf_pub.MCHID  #商户号
+        # self.parameters["appid"] = WxPayConf_pub.APPID  #公众账号ID
+        # self.parameters["mch_id"] = WxPayConf_pub.MCHID  #商户号
         self.parameters["nonce_str"] = self.createNoncestr()  #随机字符串
         self.parameters["sign"] = self.getSign(self.parameters)  #签名
         return  self.arrayToXml(self.parameters)
@@ -584,6 +682,23 @@ class Notify_pub(Wxpay_server_pub):
     """通用通知接口"""
     
 
+class Notify_wx(Wxpay_server_pub):
+    """通用通知接口"""
+
+    def getSign(self, obj):
+        """生成签名"""
+        #签名步骤一：按字典序排序参数,formatBizQueryParaMap已做
+        String = self.formatBizQueryParaMap(obj, False)
+        #签名步骤二：在string后加入KEY
+        String = "{0}&key={1}".format(String, WxPayConf_pub.APP_KEY)
+        logging.warning('wx回调验证签名key: %s ' % String)
+        #签名步骤三：MD5加密
+        String = hashlib.md5(str2bytes(String)).hexdigest()
+        #签名步骤四：所有字符转为大写
+        result_ = String.upper()
+        logging.warning('wx回调 签名: %s ' % result_)
+        return result_
+
 
 class NativeCall_pub(Wxpay_server_pub):
     """请求商家获取商品信息接口"""
@@ -633,15 +748,3 @@ class NativeLink_pub(Common_util_pub):
         """返回链接"""
         self.createLink()
         return self.url
-
-
-def test():
-    c = HttpClient()
-    assert c.get("http://www.baidu.com")[:15] == "<!DOCTYPE html>"
-    c2 = HttpClient()
-    assert id(c) == id(c2)
-
-
-
-if __name__ == "__main__":
-    test()
